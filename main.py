@@ -24,9 +24,9 @@ from models.joint_model import JointModel
 # Import our custom modules
 from data_preprocess import preprocess_transplant_data
 from graph_create import create_full_pipeline
-from train_pass import train_model, load_checkpoint, setup_logging
-from eval_pass import evaluate_model, print_evaluation_summary, evaluate_with_cross_validation
-
+from train_utils.train_pass import train_model, load_checkpoint, setup_logging, evaluate_with_cross_validation
+from train_utils.eval_pass import evaluate_model, print_evaluation_summary
+from utils.data_splitting import create_data_splits
 def parse_args():
     parser = argparse.ArgumentParser(description='Kidney Transplant Graph Neural Network Training')
     
@@ -203,7 +203,7 @@ def main():
     print("LOADING AND PROCESSING DATA")
     print("="*60)
     
-    # Load and process data using our modular pipeline
+    # Load and process data using your existing pipeline
     homo_data, pair_to_label, relation_mapping, edge_stats = create_full_pipeline(
         csv_path=args.data_path,
         outcome_variable=args.outcome_variable,
@@ -212,7 +212,7 @@ def main():
         return_homogeneous=True
     )
     
-    # Extract mappings from preprocessing (we need to get these separately)
+    # Extract mappings from preprocessing 
     preprocessed_data = preprocess_transplant_data(args.data_path, args.outcome_variable)
     donor_mapping = preprocessed_data['donor_node_mapping']
     recipient_mapping = preprocessed_data['recipient_node_mapping']
@@ -242,12 +242,9 @@ def main():
     
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    
-    # Handle different modes
     if args.mode == 'train':
-        # Training mode
         print("\n" + "="*60)
-        print("STARTING TRAINING")
+        print("STARTING TRAINING WITH PROPER DATA SPLITS")
         print("="*60)
         
         # Load checkpoint if resuming
@@ -256,7 +253,7 @@ def main():
             epoch, metrics = load_checkpoint(args.resume, model)
             print(f"Resumed from epoch {epoch}")
         
-        # Train the model
+        # NEW: Train with automatic data splitting
         trained_model, training_history = train_model(
             model=model,
             graph_data=homo_data,
@@ -268,15 +265,11 @@ def main():
         )
         
         print("\n" + "="*60)
-        print("TRAINING COMPLETED")
+        print("TRAINING COMPLETED - EVALUATING ON ALL SPLITS")
         print("="*60)
         
-        # Evaluate the trained model
-        print("\n" + "="*60)
-        print("EVALUATING TRAINED MODEL")
-        print("="*60)
-        
-        outcome_metrics, link_metrics = evaluate_model(
+        # NEW: Comprehensive evaluation on train/val/test
+        results = evaluate_model(
             model=trained_model,
             graph_data=homo_data,
             transplant_edges=transplant_edges,
@@ -286,8 +279,8 @@ def main():
             args=args
         )
         
-        # Print summary
-        print_evaluation_summary(outcome_metrics, link_metrics, args)
+        # NEW: Print comprehensive summary
+        print_evaluation_summary(results, args)
         
     elif args.mode == 'eval' or args.eval_only:
         # Evaluation mode
@@ -299,11 +292,11 @@ def main():
         print(f"Loaded model from epoch {epoch}")
         
         print("\n" + "="*60)
-        print("STARTING EVALUATION")
+        print("STARTING COMPREHENSIVE EVALUATION")
         print("="*60)
         
-        # Evaluate the model
-        outcome_metrics, link_metrics = evaluate_model(
+        # NEW: Evaluate on all splits (train/val/test)
+        results = evaluate_model(
             model=model,
             graph_data=homo_data,
             transplant_edges=transplant_edges,
@@ -313,8 +306,8 @@ def main():
             args=args
         )
         
-        # Print summary
-        print_evaluation_summary(outcome_metrics, link_metrics, args)
+        # NEW: Print comprehensive summary
+        print_evaluation_summary(results, args)
         
         # Cross-validation if requested
         if args.cross_validation > 1:
@@ -322,8 +315,20 @@ def main():
             print("RUNNING CROSS-VALIDATION")
             print("="*60)
             
+            # Note: You'll need to create a model factory function for CV
+            from models.joint_model import JointModel
+            from models.gnn_encoder import RGCNEncoder  
+            from models.decoder import DistMultDecoder
+            from models.classifier import MLPClassifier
+            
+            def create_model_for_cv(input_dim, num_relations):
+                encoder = RGCNEncoder(input_dim, args.hidden_dim, num_relations)
+                decoder = DistMultDecoder(args.hidden_dim, args.relation_dim, num_relations)
+                classifier = MLPClassifier(args.hidden_dim * 2, args.hidden_dim, 1, args.dropout)
+                return JointModel(encoder, decoder, classifier)
+            
             cv_results = evaluate_with_cross_validation(
-                model_class=model,
+                model_class=create_model_for_cv,
                 graph_data=homo_data,
                 transplant_edges=transplant_edges,
                 pair_to_label=pair_to_label,
@@ -337,28 +342,6 @@ def main():
                 print(f"  Outcome AUC: {cv_results['outcome_aucs']['mean']:.4f} ± {cv_results['outcome_aucs']['std']:.4f}")
                 if args.use_link_prediction:
                     print(f"  Link AUC: {cv_results['link_aucs']['mean']:.4f} ± {cv_results['link_aucs']['std']:.4f}")
-    
-    elif args.mode == 'test':
-        # Test mode (similar to eval but potentially with different data splits)
-        print("Test mode - using same evaluation pipeline")
-        if not args.resume:
-            raise ValueError("Test mode requires --resume with path to checkpoint")
-        
-        print(f"\nLoading model from: {args.resume}")
-        epoch, metrics = load_checkpoint(args.resume, model)
-        print(f"Loaded model from epoch {epoch}")
-        
-        outcome_metrics, link_metrics = evaluate_model(
-            model=model,
-            graph_data=homo_data,
-            transplant_edges=transplant_edges,
-            pair_to_label=pair_to_label,
-            donor_mapping=donor_mapping,
-            recipient_mapping=recipient_mapping,
-            args=args
-        )
-        
-        print_evaluation_summary(outcome_metrics, link_metrics, args)
     
     print("\n" + "="*60)
     print("EXPERIMENT COMPLETED")

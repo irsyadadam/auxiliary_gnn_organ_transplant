@@ -6,27 +6,12 @@ if [[ "${CONDA_DEFAULT_ENV:-}" == "base" ]]; then
   echo "activate a non-base conda env and re-run."
   exit 1
 fi
-
-mamba install -y pip
-
-# scientific stl
-mamba install -y \
-    pandas \
-    matplotlib \
-    seaborn \
-    tqdm \
-    scikit-learn \
-    scipy \
-    ipykernel \
-    jupyter
-
-# kernel spec for Jupyter
-python3 -m ipykernel install --user \
-    --name="pyg_CUDA_py311" \
-    --display-name="pyg_CUDA (py3.11)"
-
 # torch 2.1.0 + cuda 11.8 with COMPATIBLE torchvision version
 python3 -m pip install --upgrade pip setuptools wheel
+
+mamba install -y pip
+python3 -m pip install numpy==1.23.5
+
 python3 -m pip install \
     torch==2.1.0+cu118 \
     torchvision==0.16.0+cu118 \
