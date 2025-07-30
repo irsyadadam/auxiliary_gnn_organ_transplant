@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+#sensitive data
+checkpoints/*
+data/*
+
 # C extensions
 *.so
 
