@@ -12,7 +12,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate pyg_CUDA
 
 # Set GPU visibility (modify as needed - single GPU for graph training)
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 # =============================================================================
 # EXPERIMENT CONFIGURATION
@@ -40,7 +40,7 @@ DATA_PATH="data/po_anycomp.csv"
 OUTCOME_VARIABLE="po_anycomp"  # Options: po_anycomp, readm30daydc
 
 # Graph Construction
-K_NEIGHBORS=10
+K_NEIGHBORS=20
 SIMILARITY_METRIC="euclidean"  # Options: euclidean, cosine, manhattan
 
 # Model Architecture
@@ -56,10 +56,10 @@ EPOCHS=100
 BATCH_SIZE=256
 LEARNING_RATE=0.001
 WEIGHT_DECAY=1e-4
-SCHEDULER="step"  # Options: cosine, step, plateau, none
+SCHEDULER="plateau"  # Options: cosine, step, plateau, none
 
 # Multi-task Learning
-ALPHA=0.7  # Weight for outcome prediction (1-alpha for link prediction)
+ALPHA=0.85  # Weight for outcome prediction (1-alpha for link prediction)
 NEGATIVE_SAMPLING_RATIO=1.0
 
 # Data Splitting
@@ -67,7 +67,7 @@ TEST_RATIO=0.2
 VAL_RATIO=0.1
 
 # Optimization
-EARLY_STOPPING=20
+EARLY_STOPPING=100
 GRADIENT_CLIPPING=1.0
 
 # Logging
