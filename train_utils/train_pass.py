@@ -1,5 +1,5 @@
 """
-train_pass.py - Updated training functions with proper train/val/test splits
+train_pass.py - Fixed training functions with proper device handling and gradient flow
 """
 
 import os
@@ -15,7 +15,6 @@ import json
 import logging
 from collections import defaultdict
 
-# FIXED IMPORT PATH
 from utils.data_splitting import create_data_splits, get_split_data
 
 def setup_logging(args):
@@ -55,84 +54,193 @@ def setup_optimizer_and_scheduler(model, args):
     
     return optimizer, scheduler
 
-def compute_link_prediction_loss(model, graph_data, pos_edges, neg_edges, args):
+def compute_ranking_link_prediction_loss(model, graph_data, pos_edges, num_nodes, args, 
+                                       num_negatives_per_positive=50):
     """
-    Compute link prediction loss using proper train/val/test splits
+    Compute ranking-based link prediction loss using margin ranking loss
     
     Args:
-        model: Joint model with encoder/decoder
-        graph_data: Full graph data (used for node embeddings)
-        pos_edges: Positive edges for this split
-        neg_edges: Negative edges for this split
+        model: Joint model
+        graph_data: Full graph data
+        pos_edges: Positive edges for training [2, num_pos]
+        num_nodes: Total number of nodes in graph
         args: Training arguments
+        num_negatives_per_positive: Number of negative samples per positive edge
     
     Returns:
-        tuple: (loss, auc_score)
+        tuple: (loss, mrr_score)
     """
     device = args.device
     
-    # Move edges to device
+    if pos_edges.shape[1] == 0:
+        return torch.tensor(0.0, device=device), 0.0
+    
+    # Ensure edges are on correct device
     pos_edges = pos_edges.to(device)
-    neg_edges = neg_edges.to(device)
     
-    # Get embeddings from full graph (but only use split-specific edges for loss)
-    node_embeddings = model.gnn_encoder(graph_data.x, graph_data.edge_index, graph_data.edge_type)
+    # Get embeddings
+    embeddings = model.get_embeddings(graph_data.x, graph_data.edge_index, graph_data.edge_type)
     
-    # FIXED: Use consistent decoder interface
-    edge_type_zeros = torch.zeros(pos_edges.shape[1], device=device, dtype=torch.long)
+    # Create edge types for link prediction (assume transplant relation = 0)
+    pos_edge_types = torch.zeros(pos_edges.shape[1], device=device, dtype=torch.long)
     
-    # Get positive scores - handle decoder return format
-    decoder_output = model.decoder(node_embeddings, pos_edges, edge_type_zeros)
-    if isinstance(decoder_output, tuple):
-        pos_scores = decoder_output[0]  # Take first element if tuple
-    else:
-        pos_scores = decoder_output
+    # Get positive scores
+    pos_scores = model.predict_links(embeddings, pos_edges, pos_edge_types)
     
-    # Get negative scores
-    edge_type_zeros_neg = torch.zeros(neg_edges.shape[1], device=device, dtype=torch.long)
-    decoder_output_neg = model.decoder(node_embeddings, neg_edges, edge_type_zeros_neg)
-    if isinstance(decoder_output_neg, tuple):
-        neg_scores = decoder_output_neg[0]  # Take first element if tuple
-    else:
-        neg_scores = decoder_output_neg
+    # Generate negative samples for each positive edge
+    total_loss = 0.0
+    num_batches = 0
+    all_ranks = []
     
-    # Binary classification loss
-    pos_labels = torch.ones(pos_scores.shape[0], device=device)
-    neg_labels = torch.zeros(neg_scores.shape[0], device=device)
+    # Create positive edge set for filtering
+    pos_edge_set = set()
+    for i in range(pos_edges.shape[1]):
+        pos_edge_set.add((pos_edges[0, i].item(), pos_edges[1, i].item()))
     
-    link_loss = F.binary_cross_entropy_with_logits(
-        torch.cat([pos_scores, neg_scores]), 
-        torch.cat([pos_labels, neg_labels])
-    )
+    for i in range(pos_edges.shape[1]):
+        head, tail = pos_edges[0, i], pos_edges[1, i]
+        pos_score = pos_scores[i]
+        
+        # Generate negative samples by corrupting tail
+        neg_tails = torch.randint(0, num_nodes, (num_negatives_per_positive,), device=device)
+        # Filter out positive edges
+        valid_negs = []
+        for neg_tail in neg_tails:
+            if (head.item(), neg_tail.item()) not in pos_edge_set:
+                valid_negs.append(neg_tail.item())
+        
+        if len(valid_negs) == 0:
+            continue
+            
+        # Create negative edges
+        neg_edges = torch.stack([
+            head.repeat(len(valid_negs)),
+            torch.tensor(valid_negs, device=device)
+        ])
+        neg_edge_types = torch.zeros(len(valid_negs), device=device, dtype=torch.long)
+        
+        # Get negative scores
+        neg_scores = model.predict_links(embeddings, neg_edges, neg_edge_types)
+        
+        # Margin ranking loss: positive score should be higher than negative scores
+        pos_score_expanded = pos_score.repeat(len(valid_negs))
+        margin_loss = F.margin_ranking_loss(
+            pos_score_expanded, neg_scores, 
+            torch.ones(len(valid_negs), device=device),
+            margin=1.0, reduction='mean'
+        )
+        
+        total_loss += margin_loss
+        num_batches += 1
+        
+        # Calculate rank for MRR (for monitoring during training)
+        with torch.no_grad():
+            all_scores = torch.cat([pos_score.unsqueeze(0), neg_scores])
+            sorted_scores, _ = torch.sort(all_scores, descending=True)
+            rank = (sorted_scores >= pos_score).sum().item()
+            all_ranks.append(rank)
     
-    # Compute metrics
+    if num_batches == 0:
+        return torch.tensor(0.0, device=device), 0.0
+    
+    # Average loss across all positive edges
+    avg_loss = total_loss / num_batches
+    
+    # Calculate MRR for monitoring
+    mrr = np.mean([1.0 / rank for rank in all_ranks]) if all_ranks else 0.0
+    
+    return avg_loss, mrr
+
+def evaluate_ranking_link_prediction(model, graph_data, test_edges, all_edges, num_nodes, args):
+    """
+    Evaluate ranking-based link prediction using MRR and Hits@K
+    
+    Args:
+        model: Trained model
+        graph_data: Full graph data
+        test_edges: Test edges to evaluate [2, num_test]
+        all_edges: All known edges for filtering [2, num_all]
+        num_nodes: Total number of nodes
+        args: Evaluation arguments
+    
+    Returns:
+        dict: Ranking metrics (MRR, Hits@1, Hits@3, Hits@10)
+    """
+    model.eval()
+    device = args.device
+    
+    if test_edges.shape[1] == 0:
+        return {'mrr': 0.0, 'hits@1': 0.0, 'hits@3': 0.0, 'hits@10': 0.0}
+    
+    # Ensure data is on device
+    test_edges = test_edges.to(device)
+    all_edges = all_edges.to(device)
+    
+    # Create set of all known edges for filtering
+    all_edge_set = set()
+    for i in range(all_edges.shape[1]):
+        all_edge_set.add((all_edges[0, i].item(), all_edges[1, i].item()))
+    
+    # Get embeddings
     with torch.no_grad():
-        all_scores = torch.cat([pos_scores, neg_scores]).cpu().numpy()
-        all_labels = torch.cat([pos_labels, neg_labels]).cpu().numpy()
-        link_auc = roc_auc_score(all_labels, all_scores) if len(np.unique(all_labels)) > 1 else 0.0
+        embeddings = model.get_embeddings(graph_data.x, graph_data.edge_index, graph_data.edge_type)
     
-    return link_loss, link_auc
+    ranks = []
+    
+    print(f"Evaluating {test_edges.shape[1]} test edges...")
+    
+    for i in tqdm(range(test_edges.shape[1]), desc="Ranking evaluation"):
+        head, tail = test_edges[0, i], test_edges[1, i]
+        
+        # Create all possible tail candidates
+        all_tails = torch.arange(num_nodes, device=device)
+        all_test_edges = torch.stack([head.repeat(num_nodes), all_tails])
+        
+        # Get scores for all candidates
+        edge_types = torch.zeros(num_nodes, device=device, dtype=torch.long)
+        with torch.no_grad():
+            all_scores = model.predict_links(embeddings, all_test_edges, edge_types)
+        
+        # Filter out known edges (except the target)
+        filtered_scores = all_scores.clone()
+        for j in range(num_nodes):
+            if j != tail.item() and (head.item(), j) in all_edge_set:
+                filtered_scores[j] = float('-inf')
+        
+        # Get rank of the true tail
+        target_score = filtered_scores[tail.item()]
+        rank = (filtered_scores >= target_score).sum().item()
+        ranks.append(rank)
+    
+    # Calculate metrics
+    ranks = np.array(ranks)
+    mrr = np.mean(1.0 / ranks)
+    hits_at_1 = np.mean(ranks == 1)
+    hits_at_10 = np.mean(ranks <= 10)
+    hits_at_100 = np.mean(ranks <= 100)
+    
+    metrics = {
+        'mrr': mrr,
+        'hits@1': hits_at_1,
+        'hits@10': hits_at_10,
+        'hits@100': hits_at_100,
+        'mean_rank': np.mean(ranks),
+        'num_test_edges': len(ranks)
+    }
+    
+    return metrics
 
 def compute_outcome_prediction_loss(model, graph_data, outcome_pairs, args):
     """
-    Compute outcome prediction loss using proper train/val/test splits
-    
-    Args:
-        model: Joint model with encoder/classifier
-        graph_data: Full graph data
-        outcome_pairs: Dict of (donor_node, recipient_node) -> label for this split
-        args: Training arguments
-    
-    Returns:
-        tuple: (loss, auc_score)
+    Compute outcome prediction loss with proper device handling
     """
     device = args.device
     
     if not outcome_pairs:
         return torch.tensor(0.0, device=device), 0.0
     
-    # Get node embeddings from full graph
-    node_embeddings = model.gnn_encoder(graph_data.x, graph_data.edge_index, graph_data.edge_type)
+    # Get embeddings
+    embeddings = model.get_embeddings(graph_data.x, graph_data.edge_index, graph_data.edge_type)
     
     # Prepare data for this split
     donor_nodes = []
@@ -144,16 +252,13 @@ def compute_outcome_prediction_loss(model, graph_data, outcome_pairs, args):
         recipient_nodes.append(recipient_id)
         labels.append(label)
     
-    donor_nodes = torch.tensor(donor_nodes, device=device)
-    recipient_nodes = torch.tensor(recipient_nodes, device=device)
+    # Convert to tensors and move to device
+    donor_nodes = torch.tensor(donor_nodes, device=device, dtype=torch.long)
+    recipient_nodes = torch.tensor(recipient_nodes, device=device, dtype=torch.long)
     labels = torch.tensor(labels, dtype=torch.float32, device=device)
     
-    # Get donor and recipient embeddings
-    donor_embeds = node_embeddings[donor_nodes]
-    recipient_embeds = node_embeddings[recipient_nodes]
-    
-    # Predict outcomes - FIXED: Use correct classifier interface
-    predictions = model.classifier(donor_embeds, recipient_embeds)
+    # Predict outcomes
+    predictions = model.predict_outcomes(embeddings, donor_nodes, recipient_nodes)
     
     # Compute loss
     outcome_loss = F.binary_cross_entropy_with_logits(predictions.squeeze(), labels)
@@ -166,73 +271,74 @@ def compute_outcome_prediction_loss(model, graph_data, outcome_pairs, args):
     
     return outcome_loss, outcome_auc
 
-def evaluate_split(model, graph_data, splits, split_name, args):
+def evaluate_split(model, graph_data, splits, split_name, args, all_transplant_edges=None):
     """
-    Evaluate model on a specific data split (train/val/test)
-    
-    Args:
-        model: Trained model
-        graph_data: Full graph data
-        splits: Data splits from create_data_splits()
-        split_name: 'train', 'val', or 'test'
-        args: Training arguments
-    
-    Returns:
-        dict: Evaluation metrics for this split
+    Evaluate model on a specific data split with ranking-based link prediction
     """
     model.eval()
+    device = args.device
+    
+    # Ensure graph data is on device
+    graph_data = graph_data.to(device)
     
     with torch.no_grad():
         # Get split-specific data
-        outcome_pairs, pos_edges, neg_edges = get_split_data(splits, split_name)
+        outcome_pairs, pos_edges, _ = get_split_data(splits, split_name)
         
         # Evaluate outcome prediction
         outcome_loss, outcome_auc = compute_outcome_prediction_loss(
             model, graph_data, outcome_pairs, args
         )
         
-        # Evaluate link prediction if enabled
-        link_loss, link_auc = 0.0, 0.0
-        if args.use_link_prediction and pos_edges.shape[1] > 0:
-            link_loss, link_auc = compute_link_prediction_loss(
-                model, graph_data, pos_edges, neg_edges, args
-            )
+        # Evaluate ranking-based link prediction if enabled
+        link_loss, link_mrr = 0.0, 0.0
+        link_metrics = {}
+        
+        if args.use_link_prediction and pos_edges.shape[1] > 0 and all_transplant_edges is not None:
+            if split_name == 'train':
+                # For training, use margin ranking loss
+                link_loss, link_mrr = compute_ranking_link_prediction_loss(
+                    model, graph_data, pos_edges, graph_data.x.shape[0], args
+                )
+            else:
+                # For val/test, use full ranking evaluation
+                link_metrics = evaluate_ranking_link_prediction(
+                    model, graph_data, pos_edges, all_transplant_edges, 
+                    graph_data.x.shape[0], args
+                )
+                link_mrr = link_metrics.get('mrr', 0.0)
+                link_loss = 0.0  # No loss computation for evaluation
         
         metrics = {
             'outcome_loss': outcome_loss.item(),
             'outcome_auc': outcome_auc,
             'link_loss': link_loss.item() if isinstance(link_loss, torch.Tensor) else link_loss,
-            'link_auc': link_auc,
+            'link_mrr': link_mrr,
             'total_loss': args.alpha * outcome_loss.item() + (1 - args.alpha) * (link_loss.item() if isinstance(link_loss, torch.Tensor) else link_loss)
         }
+        
+        if link_metrics:
+            metrics.update({
+                'link_hits@1': link_metrics.get('hits@1', 0.0),
+                'link_hits@10': link_metrics.get('hits@10', 0.0),
+                'link_hits@100': link_metrics.get('hits@100', 0.0),
+                'link_mean_rank': link_metrics.get('mean_rank', 0.0)
+            })
     
     return metrics
 
-def train_epoch(model, graph_data, splits, optimizer, scheduler, args, epoch, logger):
+def train_epoch(model, graph_data, splits, optimizer, scheduler, args, epoch, logger, all_transplant_edges):
     """
-    Train for one epoch using proper train split
-    
-    Args:
-        model: Model to train
-        graph_data: Full graph data
-        splits: Data splits from create_data_splits()
-        optimizer: Optimizer
-        scheduler: Learning rate scheduler
-        args: Training arguments
-        epoch: Current epoch
-        logger: Logger instance
-    
-    Returns:
-        dict: Training metrics for this epoch
+    Train for one epoch with ranking-based link prediction
     """
     model.train()
     device = args.device
     
-    # Move data to device
+    # Ensure graph data is on device
     graph_data = graph_data.to(device)
     
     # Get training data
-    train_outcome_pairs, train_pos_edges, train_neg_edges = get_split_data(splits, 'train')
+    train_outcome_pairs, train_pos_edges, _ = get_split_data(splits, 'train')
     
     optimizer.zero_grad()
     
@@ -243,11 +349,11 @@ def train_epoch(model, graph_data, splits, optimizer, scheduler, args, epoch, lo
     
     total_loss = args.alpha * outcome_loss
     
-    # Compute link prediction loss (auxiliary task) if enabled
-    link_loss, link_auc = 0.0, 0.0
+    # Compute ranking-based link prediction loss (auxiliary task) if enabled
+    link_loss, link_mrr = 0.0, 0.0
     if args.use_link_prediction and train_pos_edges.shape[1] > 0:
-        link_loss, link_auc = compute_link_prediction_loss(
-            model, graph_data, train_pos_edges, train_neg_edges, args
+        link_loss, link_mrr = compute_ranking_link_prediction_loss(
+            model, graph_data, train_pos_edges, graph_data.x.shape[0], args
         )
         total_loss += (1 - args.alpha) * link_loss
     
@@ -268,7 +374,7 @@ def train_epoch(model, graph_data, splits, optimizer, scheduler, args, epoch, lo
         log_msg = f"Epoch {epoch:04d} | Total Loss: {total_loss.item():.4f} | Outcome Loss: {outcome_loss.item():.4f} | Outcome AUC: {outcome_auc:.4f}"
         if args.use_link_prediction:
             link_loss_val = link_loss.item() if isinstance(link_loss, torch.Tensor) else link_loss
-            log_msg += f" | Link Loss: {link_loss_val:.4f} | Link AUC: {link_auc:.4f}"
+            log_msg += f" | Link Loss: {link_loss_val:.4f} | Link MRR: {link_mrr:.4f}"
         logger.info(log_msg)
         
         if args.verbose:
@@ -279,7 +385,7 @@ def train_epoch(model, graph_data, splits, optimizer, scheduler, args, epoch, lo
         'outcome_loss': outcome_loss.item(),
         'outcome_auc': outcome_auc,
         'link_loss': link_loss.item() if isinstance(link_loss, torch.Tensor) else link_loss,
-        'link_auc': link_auc
+        'link_mrr': link_mrr
     }
     
     return metrics
@@ -320,27 +426,18 @@ def save_training_history(training_history, args):
 
 def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mapping, recipient_mapping, args):
     """
-    Main training function with proper train/val/test splits
-    
-    Args:
-        model: Model to train
-        graph_data: Full graph data
-        transplant_edges: All transplant edges
-        pair_to_label: All outcome pairs
-        donor_mapping: Donor ID mappings
-        recipient_mapping: Recipient ID mappings
-        args: Training arguments
-    
-    Returns:
-        tuple: (trained_model, training_history)
+    Main training function with ranking-based link prediction
     """
     
     # Setup logging
     logger = setup_logging(args)
     
-    # Create proper data splits
+    # Ensure model is on correct device
+    model = model.to(args.device)
+    
+    # Create proper data splits (modified for ranking-based LP)
     logger.info("Creating train/validation/test splits...")
-    splits = create_data_splits(pair_to_label, transplant_edges, graph_data.x.shape[0], args)
+    splits = create_ranking_data_splits(pair_to_label, transplant_edges, graph_data.x.shape[0], args)
     
     # Setup optimizer and scheduler
     optimizer, scheduler = setup_optimizer_and_scheduler(model, args)
@@ -352,7 +449,9 @@ def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mappin
     
     logger.info(f"Starting training for {args.epochs} epochs")
     logger.info(f"Multi-task learning: {args.use_link_prediction}")
+    logger.info(f"Link prediction: Ranking-based (MRR, Hits@K)")
     logger.info(f"Alpha (outcome weight): {args.alpha}")
+    logger.info(f"Device: {args.device}")
     
     start_time = time.time()
     
@@ -361,7 +460,7 @@ def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mappin
             # Train epoch
             train_metrics = train_epoch(
                 model, graph_data, splits, optimizer, scheduler, 
-                args, epoch, logger
+                args, epoch, logger, transplant_edges
             )
             
             # Store training metrics
@@ -369,18 +468,22 @@ def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mappin
                 training_history[f'train_{key}'].append(value)
             
             # Evaluate on validation set
-            val_metrics = evaluate_split(model, graph_data, splits, 'val', args)
+            val_metrics = evaluate_split(model, graph_data, splits, 'val', args, transplant_edges)
             for key, value in val_metrics.items():
                 training_history[f'val_{key}'].append(value)
             
-            # Check for best model (using validation outcome AUC)
+            # Check for best model (using validation outcome AUC + link MRR)
             current_val_metric = val_metrics['outcome_auc']
+            if args.use_link_prediction:
+                # Combine outcome and link metrics for best model selection
+                current_val_metric = args.alpha * val_metrics['outcome_auc'] + (1 - args.alpha) * val_metrics['link_mrr']
+            
             is_best = current_val_metric > best_val_metric
             
             if is_best:
                 best_val_metric = current_val_metric
                 patience_counter = 0
-                logger.info(f"New best model at epoch {epoch} with val outcome AUC: {best_val_metric:.4f}")
+                logger.info(f"New best model at epoch {epoch} with combined metric: {best_val_metric:.4f}")
             else:
                 patience_counter += 1
             
@@ -389,8 +492,9 @@ def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mappin
                 logger.info(f"Validation - Outcome AUC: {val_metrics['outcome_auc']:.4f}, "
                            f"Outcome Loss: {val_metrics['outcome_loss']:.4f}")
                 if args.use_link_prediction:
-                    logger.info(f"Validation - Link AUC: {val_metrics['link_auc']:.4f}, "
-                               f"Link Loss: {val_metrics['link_loss']:.4f}")
+                    logger.info(f"Validation - Link MRR: {val_metrics['link_mrr']:.4f}")
+                    if 'link_hits@10' in val_metrics:
+                        logger.info(f"Validation - Hits@10: {val_metrics['link_hits@10']:.4f}")
             
             # Save checkpoint
             if epoch % args.save_interval == 0 or is_best:
@@ -419,14 +523,16 @@ def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mappin
         
         total_time = time.time() - start_time
         logger.info(f"Training completed in {total_time:.2f} seconds")
-        logger.info(f"Best validation outcome AUC: {best_val_metric:.4f}")
+        logger.info(f"Best validation combined metric: {best_val_metric:.4f}")
     
     # Evaluate on test set with best model
     logger.info("Evaluating on test set...")
-    test_metrics = evaluate_split(model, graph_data, splits, 'test', args)
+    test_metrics = evaluate_split(model, graph_data, splits, 'test', args, transplant_edges)
     logger.info(f"Test Results - Outcome AUC: {test_metrics['outcome_auc']:.4f}")
     if args.use_link_prediction:
-        logger.info(f"Test Results - Link AUC: {test_metrics['link_auc']:.4f}")
+        logger.info(f"Test Results - Link MRR: {test_metrics['link_mrr']:.4f}")
+        logger.info(f"Test Results - Hits@1: {test_metrics.get('link_hits@1', 0):.4f}")
+        logger.info(f"Test Results - Hits@10: {test_metrics.get('link_hits@10', 0):.4f}")
     
     # Add test metrics to history
     for key, value in test_metrics.items():
@@ -447,103 +553,3 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None):
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     
     return checkpoint['epoch'], checkpoint['metrics']
-
-# Cross-validation utility (optional)
-def evaluate_with_cross_validation(model_class, graph_data, transplant_edges, pair_to_label, 
-                                 donor_mapping, recipient_mapping, args, n_folds=5):
-    """
-    Perform k-fold cross-validation evaluation
-    
-    Args:
-        model_class: Model class to instantiate
-        graph_data: Full graph data
-        transplant_edges: All transplant edges
-        pair_to_label: All outcome pairs
-        donor_mapping: Donor ID mappings
-        recipient_mapping: Recipient ID mappings
-        args: Training arguments
-        n_folds: Number of CV folds
-    
-    Returns:
-        dict: Cross-validation results
-    """
-    from sklearn.model_selection import StratifiedKFold
-    
-    # Prepare data for CV
-    pairs = list(pair_to_label.keys())
-    labels = list(pair_to_label.values())
-    
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=args.seed)
-    
-    cv_results = {
-        'outcome_aucs': [],
-        'link_aucs': [],
-        'fold_histories': []
-    }
-    
-    print(f"Starting {n_folds}-fold cross-validation...")
-    
-    for fold, (train_val_idx, test_idx) in enumerate(skf.split(pairs, labels)):
-        print(f"\nFold {fold + 1}/{n_folds}")
-        
-        # Create fold-specific pair_to_label
-        train_val_pairs = [pairs[i] for i in train_val_idx]
-        test_pairs = [pairs[i] for i in test_idx]
-        train_val_labels = [labels[i] for i in train_val_idx]
-        test_labels = [labels[i] for i in test_idx]
-        
-        fold_pair_to_label = {pair: label for pair, label in zip(train_val_pairs, train_val_labels)}
-        
-        # Create new model for this fold
-        model = model_class(
-            input_dim=graph_data.x.shape[1],
-            num_relations=graph_data.num_relations
-        ).to(args.device)
-        
-        # Temporarily adjust args for this fold
-        original_epochs = args.epochs
-        args.epochs = min(50, args.epochs)  # Reduce epochs for CV
-        
-        # Train on this fold
-        trained_model, fold_history = train_model(
-            model, graph_data, transplant_edges, fold_pair_to_label,
-            donor_mapping, recipient_mapping, args
-        )
-        
-        # Restore original epochs
-        args.epochs = original_epochs
-        
-        # Extract test performance
-        test_outcome_auc = fold_history.get('test_outcome_auc', 0.0)
-        test_link_auc = fold_history.get('test_link_auc', 0.0)
-        
-        cv_results['outcome_aucs'].append(test_outcome_auc)
-        cv_results['link_aucs'].append(test_link_auc)
-        cv_results['fold_histories'].append(fold_history)
-        
-        print(f"Fold {fold + 1} - Outcome AUC: {test_outcome_auc:.4f}")
-        if args.use_link_prediction:
-            print(f"Fold {fold + 1} - Link AUC: {test_link_auc:.4f}")
-    
-    # Calculate summary statistics
-    outcome_aucs = np.array(cv_results['outcome_aucs'])
-    link_aucs = np.array(cv_results['link_aucs'])
-    
-    cv_results['outcome_aucs'] = {
-        'mean': np.mean(outcome_aucs),
-        'std': np.std(outcome_aucs),
-        'values': outcome_aucs.tolist()
-    }
-    
-    cv_results['link_aucs'] = {
-        'mean': np.mean(link_aucs),
-        'std': np.std(link_aucs),
-        'values': link_aucs.tolist()
-    }
-    
-    print(f"\nCross-validation completed!")
-    print(f"Outcome AUC: {cv_results['outcome_aucs']['mean']:.4f} ± {cv_results['outcome_aucs']['std']:.4f}")
-    if args.use_link_prediction:
-        print(f"Link AUC: {cv_results['link_aucs']['mean']:.4f} ± {cv_results['link_aucs']['std']:.4f}")
-    
-    return cv_results

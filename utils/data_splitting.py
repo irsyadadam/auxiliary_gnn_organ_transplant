@@ -3,7 +3,7 @@ data_splitting.py - Data splitting utilities for PyTorch Geometric multi-task le
 
 This module handles proper train/validation/test splits for both:
 1. Outcome prediction (donor-recipient pairs)
-2. Link prediction (transplant edges)
+2. Ranking-based link prediction (transplant edges)
 """
 
 import torch
@@ -70,9 +70,9 @@ def stratified_split_pairs(pair_to_label, test_ratio=0.2, val_ratio=0.1, random_
     
     return train_dict, val_dict, test_dict
 
-def split_transplant_edges(transplant_edges, test_ratio=0.2, val_ratio=0.1, random_state=42):
+def split_transplant_edges_ranking(transplant_edges, test_ratio=0.2, val_ratio=0.1, random_state=42):
     """
-    Split transplant edges for link prediction evaluation
+    Split transplant edges for ranking-based link prediction evaluation
     
     Args:
         transplant_edges: torch.Tensor of shape [2, num_edges]
@@ -87,7 +87,7 @@ def split_transplant_edges(transplant_edges, test_ratio=0.2, val_ratio=0.1, rand
     num_edges = transplant_edges.shape[1]
     indices = np.arange(num_edges)
     
-    print(f"Splitting {num_edges} transplant edges for link prediction")
+    print(f"Splitting {num_edges} transplant edges for ranking-based link prediction")
     
     # Random shuffle
     np.random.seed(random_state)
@@ -108,25 +108,105 @@ def split_transplant_edges(transplant_edges, test_ratio=0.2, val_ratio=0.1, rand
     val_edges = transplant_edges[:, val_indices]
     test_edges = transplant_edges[:, test_indices]
     
-    print(f"Link prediction edge splits:")
+    print(f"Ranking-based link prediction edge splits:")
     print(f"  Train: {train_edges.shape[1]} edges ({train_edges.shape[1]/num_edges:.1%})")
     print(f"  Val:   {val_edges.shape[1]} edges ({val_edges.shape[1]/num_edges:.1%})")
     print(f"  Test:  {test_edges.shape[1]} edges ({test_edges.shape[1]/num_edges:.1%})")
     
     return train_edges, val_edges, test_edges
 
-def create_negative_samples_split(positive_edges, num_nodes, negative_ratio=1.0, random_state=42):
+def create_data_splits(pair_to_label, transplant_edges, num_nodes, args):
     """
-    Create negative samples for link prediction with consistent splitting
+    Create comprehensive data splits for multi-task learning with ranking-based LP
     
     Args:
-        positive_edges: torch.Tensor of positive edges [2, num_pos_edges]
-        num_nodes: Total number of nodes in graph
-        negative_ratio: Ratio of negative to positive samples
-        random_state: Random seed
+        pair_to_label: Dict mapping (donor_node, recipient_node) -> outcome
+        transplant_edges: torch.Tensor of transplant edges [2, num_edges]
+        num_nodes: Total number of nodes
+        args: Arguments containing split ratios and random seed
     
     Returns:
-        torch.Tensor: Negative edges [2, num_neg_edges]
+        dict: Comprehensive data splits containing:
+            - outcome_splits: {train, val, test} dicts for outcome prediction
+            - link_splits: {train, val, test} edge tensors for ranking-based link prediction
+            - negative_edges: Empty tensors (not used in ranking approach)
+    """
+    
+    print("\n" + "="*60)
+    print("CREATING DATA SPLITS FOR RANKING-BASED LINK PREDICTION")
+    print("="*60)
+    
+    # Split outcome prediction pairs
+    train_pairs, val_pairs, test_pairs = stratified_split_pairs(
+        pair_to_label, 
+        test_ratio=args.test_ratio,
+        val_ratio=args.val_ratio,
+        random_state=args.seed
+    )
+    
+    # Split transplant edges for ranking-based link prediction
+    train_edges, val_edges, test_edges = split_transplant_edges_ranking(
+        transplant_edges,
+        test_ratio=args.test_ratio,
+        val_ratio=args.val_ratio,
+        random_state=args.seed
+    )
+    
+    # For ranking-based approach, we don't pre-generate negative samples
+    # They are created on-the-fly during evaluation
+    empty_neg_edges = torch.empty((2, 0), dtype=torch.long)
+    
+    splits = {
+        'outcome_splits': {
+            'train': train_pairs,
+            'val': val_pairs,
+            'test': test_pairs
+        },
+        'link_splits': {
+            'train': train_edges,
+            'val': val_edges,
+            'test': test_edges
+        },
+        'negative_edges': {  # Empty for ranking-based approach
+            'train': empty_neg_edges,
+            'val': empty_neg_edges,
+            'test': empty_neg_edges
+        }
+    }
+    
+    print(f"\nRanking-based data splitting completed!")
+    print(f"Ready for MRR and Hits@K evaluation")
+    
+    return splits
+
+def get_split_data(splits, split_name='train'):
+    """
+    Get data for a specific split (train, val, or test)
+    
+    Args:
+        splits: Data splits from create_data_splits()
+        split_name: 'train', 'val', or 'test'
+    
+    Returns:
+        tuple: (outcome_pairs, pos_edges, neg_edges)
+        Note: neg_edges will be empty for ranking-based approach
+    """
+    
+    if split_name not in ['train', 'val', 'test']:
+        raise ValueError(f"Invalid split_name: {split_name}. Must be 'train', 'val', or 'test'")
+    
+    outcome_pairs = splits['outcome_splits'][split_name]
+    pos_edges = splits['link_splits'][split_name]
+    neg_edges = splits['negative_edges'][split_name]  # Will be empty for ranking approach
+    
+    return outcome_pairs, pos_edges, neg_edges
+
+# Legacy compatibility functions (for binary classification approach)
+def create_negative_samples_split(positive_edges, num_nodes, negative_ratio=1.0, random_state=42):
+    """
+    Create negative samples for binary classification link prediction
+    
+    This function is kept for backward compatibility but not used in ranking approach.
     """
     
     num_pos = positive_edges.shape[1]
@@ -161,101 +241,6 @@ def create_negative_samples_split(positive_edges, num_nodes, negative_ratio=1.0,
     
     negative_edges_tensor = torch.tensor(negative_edges, dtype=torch.long).t()
     return negative_edges_tensor
-
-def create_data_splits(pair_to_label, transplant_edges, num_nodes, args):
-    """
-    Create comprehensive data splits for multi-task learning
-    
-    Args:
-        pair_to_label: Dict mapping (donor_node, recipient_node) -> outcome
-        transplant_edges: torch.Tensor of transplant edges [2, num_edges]
-        num_nodes: Total number of nodes
-        args: Arguments containing split ratios and random seed
-    
-    Returns:
-        dict: Comprehensive data splits containing:
-            - outcome_splits: {train, val, test} dicts for outcome prediction
-            - link_splits: {train, val, test} edge tensors for link prediction
-            - negative_edges: {train, val, test} negative edge tensors
-    """
-    
-    print("\n" + "="*60)
-    print("CREATING DATA SPLITS")
-    print("="*60)
-    
-    # Split outcome prediction pairs
-    train_pairs, val_pairs, test_pairs = stratified_split_pairs(
-        pair_to_label, 
-        test_ratio=args.test_ratio,
-        val_ratio=args.val_ratio,
-        random_state=args.seed
-    )
-    
-    # Split transplant edges for link prediction
-    train_edges, val_edges, test_edges = split_transplant_edges(
-        transplant_edges,
-        test_ratio=args.test_ratio,
-        val_ratio=args.val_ratio,
-        random_state=args.seed
-    )
-    
-    # Create negative samples for each split
-    print("\nCreating negative samples for link prediction...")
-    train_neg_edges = create_negative_samples_split(
-        train_edges, num_nodes, args.negative_sampling_ratio, args.seed
-    )
-    val_neg_edges = create_negative_samples_split(
-        val_edges, num_nodes, args.negative_sampling_ratio, args.seed + 1
-    )
-    test_neg_edges = create_negative_samples_split(
-        test_edges, num_nodes, args.negative_sampling_ratio, args.seed + 2
-    )
-    
-    splits = {
-        'outcome_splits': {
-            'train': train_pairs,
-            'val': val_pairs,
-            'test': test_pairs
-        },
-        'link_splits': {
-            'train': train_edges,
-            'val': val_edges,
-            'test': test_edges
-        },
-        'negative_edges': {
-            'train': train_neg_edges,
-            'val': val_neg_edges,
-            'test': test_neg_edges
-        }
-    }
-    
-    print(f"\nData splitting completed successfully!")
-    print(f"Ready for proper train/val/test evaluation")
-    
-    return splits
-
-def get_split_data(splits, split_name='train'):
-    """
-    Get data for a specific split (train, val, or test)
-    
-    Args:
-        splits: Data splits from create_data_splits()
-        split_name: 'train', 'val', or 'test'
-    
-    Returns:
-        tuple: (outcome_pairs, pos_edges, neg_edges)
-    """
-    
-    if split_name not in ['train', 'val', 'test']:
-        raise ValueError(f"Invalid split_name: {split_name}. Must be 'train', 'val', or 'test'")
-    
-    outcome_pairs = splits['outcome_splits'][split_name]
-    pos_edges = splits['link_splits'][split_name]
-    neg_edges = splits['negative_edges'][split_name]
-    
-    return outcome_pairs, pos_edges, neg_edges
-
-# Utility functions for integration with existing code
 
 def create_split_masks(pair_to_label, splits):
     """
@@ -305,7 +290,7 @@ if __name__ == "__main__":
     
     args = Args()
     
-    # Test splitting
+    # Test ranking-based splitting
     splits = create_data_splits(pair_to_label, transplant_edges, 200, args)
     
     # Test getting split data
@@ -313,4 +298,4 @@ if __name__ == "__main__":
     print(f"\nTrain split contains:")
     print(f"  Outcome pairs: {len(train_outcome)}")
     print(f"  Positive edges: {train_pos.shape[1]}")
-    print(f"  Negative edges: {train_neg.shape[1]}")
+    print(f"  Negative edges: {train_neg.shape[1]} (empty for ranking approach)")

@@ -200,7 +200,6 @@ def main():
     print("LOADING AND PROCESSING DATA")
     print("="*60)
     
-    # Load and process data using your existing pipeline - FIXED FUNCTION NAME
     homo_data, pair_to_label, relation_mapping, edge_stats = create_graph_full_pipeline(
         csv_path=args.data_path,
         outcome_variable=args.outcome_variable,
@@ -209,15 +208,12 @@ def main():
         return_homogeneous=True
     )
     
-    # Extract mappings from preprocessing 
     preprocessed_data = preprocess_transplant_data(args.data_path, args.outcome_variable)
     donor_mapping = preprocessed_data['donor_node_mapping']
     recipient_mapping = preprocessed_data['recipient_node_mapping']
     
-    # Extract transplant edges for link prediction
     transplant_edges = extract_transplant_edges(homo_data, relation_mapping)
     
-    # Get graph dimensions
     input_dim = homo_data.x.shape[1]
     num_relations = homo_data.num_relations
     
@@ -229,7 +225,6 @@ def main():
     print(f"  Relations: {num_relations}")
     print(f"  Outcome pairs: {len(pair_to_label)}")
     
-    # Create model
     print("\n" + "="*60)
     print("CREATING MODEL")
     print("="*60)
@@ -245,13 +240,11 @@ def main():
         print("STARTING TRAINING WITH PROPER DATA SPLITS")
         print("="*60)
         
-        # Load checkpoint if resuming
         if args.resume:
             print(f"Resuming training from: {args.resume}")
             epoch, metrics = load_checkpoint(args.resume, model)
             print(f"Resumed from epoch {epoch}")
         
-        # Train with automatic data splitting
         trained_model, training_history = train_model(
             model=model,
             graph_data=homo_data,
@@ -266,7 +259,6 @@ def main():
         print("TRAINING COMPLETED - EVALUATING ON ALL SPLITS")
         print("="*60)
         
-        # Comprehensive evaluation on train/val/test
         results = evaluate_model(
             model=trained_model,
             graph_data=homo_data,
@@ -277,7 +269,6 @@ def main():
             args=args
         )
         
-        # Print comprehensive summary
         print_evaluation_summary(results, args)
         
     elif args.mode == 'eval' or args.eval_only:
@@ -293,7 +284,6 @@ def main():
         print("STARTING COMPREHENSIVE EVALUATION")
         print("="*60)
         
-        # Evaluate on all splits (train/val/test)
         results = evaluate_model(
             model=model,
             graph_data=homo_data,
@@ -304,10 +294,8 @@ def main():
             args=args
         )
         
-        # Print comprehensive summary
         print_evaluation_summary(results, args)
         
-        # Cross-validation if requested
         if args.cross_validation > 1:
             print("\n" + "="*60)
             print("RUNNING CROSS-VALIDATION")
