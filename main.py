@@ -79,7 +79,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     
     # Logging and debugging
-    parser.add_argument('--log_interval', type=int, default=10, help='Logging interval for training progress')
+    parser.add_argument('--log_interval', type=int, default=1, help='Logging interval for training progress')
     parser.add_argument('--save_interval', type=int, default=20, help='Model checkpoint saving interval')
     parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose logging')
     parser.add_argument('--debug', action='store_true', default=False, help='Enable debug mode')
@@ -110,9 +110,10 @@ def create_model(args, input_dim, num_relations):
             input_dim=input_dim,
             hidden_dim=args.hidden_dim,
             num_relations=num_relations,
-            dropout=args.dropout
+            dropout=args.dropout  # ✅ Now this parameter exists
         )
     elif args.gnn_type == 'rgat':
+        # FIXED: Import is now available in gnn_encoder.py
         from models.gnn_encoder import RGATEncoder
         encoder = RGATEncoder(
             input_dim=input_dim,
@@ -123,7 +124,7 @@ def create_model(args, input_dim, num_relations):
     else:
         raise ValueError(f"Unsupported GNN type: {args.gnn_type}")
     
-    # Create decoder - FIXED INTERFACE
+    # Create decoder - Interface already fixed in previous artifacts
     if args.decoder_type == 'distmult':
         decoder = DistMultDecoder(
             num_relations=num_relations,
@@ -137,7 +138,7 @@ def create_model(args, input_dim, num_relations):
     else:
         raise ValueError(f"Unsupported decoder type: {args.decoder_type}")
     
-    # Create classifier - FIXED INTERFACE
+    # Create classifier - Interface already fixed in previous artifacts
     classifier = MLPClassifier(
         input_dim=args.hidden_dim * 2,  # Concatenated donor + recipient embeddings
         hidden_dim=args.hidden_dim,

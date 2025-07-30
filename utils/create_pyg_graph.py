@@ -249,8 +249,8 @@ def create_graph_full_pipeline(csv_path,
         Tuple containing graph, mappings, and statistics
     """
     
-    # Import here to avoid circular imports
-    from data_preprocess import preprocess_transplant_data
+    # FIXED: Import from correct module
+    from utils.data_processing import preprocess_transplant_data
     
     # Preprocess data
     preprocessed_data = preprocess_transplant_data(csv_path, outcome_variable)
@@ -275,7 +275,7 @@ def create_graph_full_pipeline(csv_path,
 
 # Example usage:
 if __name__ == "__main__":
-    from data_preprocess import preprocess_transplant_data
+    from utils.data_processing import preprocess_transplant_data
     
     # Example 1: Step by step
     print("Example 1: Step-by-step approach")

@@ -56,7 +56,7 @@ EPOCHS=100
 BATCH_SIZE=256
 LEARNING_RATE=0.001
 WEIGHT_DECAY=1e-4
-SCHEDULER="cosine"  # Options: cosine, step, plateau, none
+SCHEDULER="step"  # Options: cosine, step, plateau, none
 
 # Multi-task Learning
 ALPHA=0.7  # Weight for outcome prediction (1-alpha for link prediction)
@@ -71,7 +71,7 @@ EARLY_STOPPING=20
 GRADIENT_CLIPPING=1.0
 
 # Logging
-LOG_INTERVAL=10
+LOG_INTERVAL=1
 SAVE_INTERVAL=20
 SEED=42
 

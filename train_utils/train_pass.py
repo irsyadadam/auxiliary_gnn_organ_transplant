@@ -164,13 +164,13 @@ def evaluate_ranking_link_prediction(model, graph_data, test_edges, all_edges, n
         args: Evaluation arguments
     
     Returns:
-        dict: Ranking metrics (MRR, Hits@1, Hits@3, Hits@10)
+        dict: Ranking metrics (MRR, Hits@1, Hits@10, Hits@100)
     """
     model.eval()
     device = args.device
     
     if test_edges.shape[1] == 0:
-        return {'mrr': 0.0, 'hits@1': 0.0, 'hits@3': 0.0, 'hits@10': 0.0}
+        return {'mrr': 0.0, 'hits@1': 0.0, 'hits@10': 0.0, 'hits@100': 0.0}
     
     # Ensure data is on device
     test_edges = test_edges.to(device)
@@ -435,9 +435,9 @@ def train_model(model, graph_data, transplant_edges, pair_to_label, donor_mappin
     # Ensure model is on correct device
     model = model.to(args.device)
     
-    # Create proper data splits (modified for ranking-based LP)
+    # Create proper data splits (FIXED: use correct function name)
     logger.info("Creating train/validation/test splits...")
-    splits = create_ranking_data_splits(pair_to_label, transplant_edges, graph_data.x.shape[0], args)
+    splits = create_data_splits(pair_to_label, transplant_edges, graph_data.x.shape[0], args)
     
     # Setup optimizer and scheduler
     optimizer, scheduler = setup_optimizer_and_scheduler(model, args)
@@ -553,3 +553,11 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None):
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     
     return checkpoint['epoch'], checkpoint['metrics']
+
+def evaluate_with_cross_validation(model_class, graph_data, transplant_edges, pair_to_label, 
+                                  donor_mapping, recipient_mapping, args):
+    """
+    Placeholder for cross-validation evaluation
+    """
+    print("Cross-validation evaluation not fully implemented yet")
+    return None
