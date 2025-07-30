@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 #sensitive data
+experiments/*
 checkpoints/*
 data/*
 !checkpoints/**/README.md
