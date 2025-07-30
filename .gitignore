@@ -6,6 +6,8 @@ __pycache__/
 #sensitive data
 checkpoints/*
 data/*
+!checkpoints/**/README.md
+!data/**/README.md
 
 # C extensions
 *.so
