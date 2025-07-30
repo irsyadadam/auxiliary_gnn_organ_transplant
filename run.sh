@@ -36,7 +36,7 @@ mkdir -p "$RESULTS_DIR"
 # =============================================================================
 
 # Data Configuration
-DATA_PATH="data/anycomp.csv"
+DATA_PATH="data/po_anycomp.csv"
 OUTCOME_VARIABLE="po_anycomp"  # Options: po_anycomp, readm30daydc
 
 # Graph Construction

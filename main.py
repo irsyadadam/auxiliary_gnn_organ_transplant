@@ -21,12 +21,13 @@ from models.decoder import DistMultDecoder, TransEDecoder
 from models.classifier import MLPClassifier
 from models.joint_model import JointModel
 
-# Import our custom modules
-from data_preprocess import preprocess_transplant_data
-from graph_create import create_full_pipeline
+# Import our custom modules - FIXED PATHS
+from utils.data_processing import preprocess_transplant_data
+from utils.create_pyg_graph import create_graph_full_pipeline
 from train_utils.train_pass import train_model, load_checkpoint, setup_logging, evaluate_with_cross_validation
 from train_utils.eval_pass import evaluate_model, print_evaluation_summary
 from utils.data_splitting import create_data_splits
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Kidney Transplant Graph Neural Network Training')
     
@@ -108,7 +109,6 @@ def create_model(args, input_dim, num_relations):
         encoder = RGCNEncoder(
             input_dim=input_dim,
             hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
             num_relations=num_relations,
             dropout=args.dropout
         )
@@ -117,30 +117,27 @@ def create_model(args, input_dim, num_relations):
         encoder = RGATEncoder(
             input_dim=input_dim,
             hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
             num_relations=num_relations,
             dropout=args.dropout
         )
     else:
         raise ValueError(f"Unsupported GNN type: {args.gnn_type}")
     
-    # Create decoder
+    # Create decoder - FIXED INTERFACE
     if args.decoder_type == 'distmult':
         decoder = DistMultDecoder(
-            embedding_dim=args.hidden_dim,
-            relation_dim=args.relation_dim,
-            num_relations=num_relations
+            num_relations=num_relations,
+            hidden_dim=args.hidden_dim
         )
     elif args.decoder_type == 'transe':
         decoder = TransEDecoder(
-            embedding_dim=args.hidden_dim,
-            relation_dim=args.relation_dim,
-            num_relations=num_relations
+            num_relations=num_relations,
+            hidden_channels=args.hidden_dim
         )
     else:
         raise ValueError(f"Unsupported decoder type: {args.decoder_type}")
     
-    # Create classifier
+    # Create classifier - FIXED INTERFACE
     classifier = MLPClassifier(
         input_dim=args.hidden_dim * 2,  # Concatenated donor + recipient embeddings
         hidden_dim=args.hidden_dim,
@@ -150,7 +147,7 @@ def create_model(args, input_dim, num_relations):
     
     # Create joint model
     model = JointModel(
-        encoder=encoder,
+        gnn_encoder=encoder,
         decoder=decoder,
         classifier=classifier
     )
@@ -203,8 +200,8 @@ def main():
     print("LOADING AND PROCESSING DATA")
     print("="*60)
     
-    # Load and process data using your existing pipeline
-    homo_data, pair_to_label, relation_mapping, edge_stats = create_full_pipeline(
+    # Load and process data using your existing pipeline - FIXED FUNCTION NAME
+    homo_data, pair_to_label, relation_mapping, edge_stats = create_graph_full_pipeline(
         csv_path=args.data_path,
         outcome_variable=args.outcome_variable,
         k_neighbors=args.k_neighbors,
@@ -242,6 +239,7 @@ def main():
     
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    
     if args.mode == 'train':
         print("\n" + "="*60)
         print("STARTING TRAINING WITH PROPER DATA SPLITS")
@@ -253,7 +251,7 @@ def main():
             epoch, metrics = load_checkpoint(args.resume, model)
             print(f"Resumed from epoch {epoch}")
         
-        # NEW: Train with automatic data splitting
+        # Train with automatic data splitting
         trained_model, training_history = train_model(
             model=model,
             graph_data=homo_data,
@@ -268,7 +266,7 @@ def main():
         print("TRAINING COMPLETED - EVALUATING ON ALL SPLITS")
         print("="*60)
         
-        # NEW: Comprehensive evaluation on train/val/test
+        # Comprehensive evaluation on train/val/test
         results = evaluate_model(
             model=trained_model,
             graph_data=homo_data,
@@ -279,7 +277,7 @@ def main():
             args=args
         )
         
-        # NEW: Print comprehensive summary
+        # Print comprehensive summary
         print_evaluation_summary(results, args)
         
     elif args.mode == 'eval' or args.eval_only:
@@ -295,7 +293,7 @@ def main():
         print("STARTING COMPREHENSIVE EVALUATION")
         print("="*60)
         
-        # NEW: Evaluate on all splits (train/val/test)
+        # Evaluate on all splits (train/val/test)
         results = evaluate_model(
             model=model,
             graph_data=homo_data,
@@ -306,7 +304,7 @@ def main():
             args=args
         )
         
-        # NEW: Print comprehensive summary
+        # Print comprehensive summary
         print_evaluation_summary(results, args)
         
         # Cross-validation if requested
@@ -315,15 +313,9 @@ def main():
             print("RUNNING CROSS-VALIDATION")
             print("="*60)
             
-            # Note: You'll need to create a model factory function for CV
-            from models.joint_model import JointModel
-            from models.gnn_encoder import RGCNEncoder  
-            from models.decoder import DistMultDecoder
-            from models.classifier import MLPClassifier
-            
             def create_model_for_cv(input_dim, num_relations):
                 encoder = RGCNEncoder(input_dim, args.hidden_dim, num_relations)
-                decoder = DistMultDecoder(args.hidden_dim, args.relation_dim, num_relations)
+                decoder = DistMultDecoder(num_relations, args.hidden_dim)
                 classifier = MLPClassifier(args.hidden_dim * 2, args.hidden_dim, 1, args.dropout)
                 return JointModel(encoder, decoder, classifier)
             

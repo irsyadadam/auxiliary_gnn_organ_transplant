@@ -15,8 +15,8 @@ import json
 import logging
 from collections import defaultdict
 
-# Import our data splitting module
-from data_splitting import create_data_splits, get_split_data
+# FIXED IMPORT PATH
+from utils.data_splitting import create_data_splits, get_split_data
 
 def setup_logging(args):
     """Setup logging configuration"""
@@ -76,21 +76,25 @@ def compute_link_prediction_loss(model, graph_data, pos_edges, neg_edges, args):
     neg_edges = neg_edges.to(device)
     
     # Get embeddings from full graph (but only use split-specific edges for loss)
-    node_embeddings = model.encoder(graph_data.x, graph_data.edge_index, graph_data.edge_type)
+    node_embeddings = model.gnn_encoder(graph_data.x, graph_data.edge_index, graph_data.edge_type)
     
-    # Predict links for positive edges
-    pos_scores = model.decoder(
-        node_embeddings, 
-        pos_edges, 
-        edge_type=torch.zeros(pos_edges.shape[1], device=device)
-    )
+    # FIXED: Use consistent decoder interface
+    edge_type_zeros = torch.zeros(pos_edges.shape[1], device=device, dtype=torch.long)
     
-    # Predict links for negative edges
-    neg_scores = model.decoder(
-        node_embeddings, 
-        neg_edges, 
-        edge_type=torch.zeros(neg_edges.shape[1], device=device)
-    )
+    # Get positive scores - handle decoder return format
+    decoder_output = model.decoder(node_embeddings, pos_edges, edge_type_zeros)
+    if isinstance(decoder_output, tuple):
+        pos_scores = decoder_output[0]  # Take first element if tuple
+    else:
+        pos_scores = decoder_output
+    
+    # Get negative scores
+    edge_type_zeros_neg = torch.zeros(neg_edges.shape[1], device=device, dtype=torch.long)
+    decoder_output_neg = model.decoder(node_embeddings, neg_edges, edge_type_zeros_neg)
+    if isinstance(decoder_output_neg, tuple):
+        neg_scores = decoder_output_neg[0]  # Take first element if tuple
+    else:
+        neg_scores = decoder_output_neg
     
     # Binary classification loss
     pos_labels = torch.ones(pos_scores.shape[0], device=device)
@@ -128,7 +132,7 @@ def compute_outcome_prediction_loss(model, graph_data, outcome_pairs, args):
         return torch.tensor(0.0, device=device), 0.0
     
     # Get node embeddings from full graph
-    node_embeddings = model.encoder(graph_data.x, graph_data.edge_index, graph_data.edge_type)
+    node_embeddings = model.gnn_encoder(graph_data.x, graph_data.edge_index, graph_data.edge_type)
     
     # Prepare data for this split
     donor_nodes = []
@@ -148,7 +152,7 @@ def compute_outcome_prediction_loss(model, graph_data, outcome_pairs, args):
     donor_embeds = node_embeddings[donor_nodes]
     recipient_embeds = node_embeddings[recipient_nodes]
     
-    # Predict outcomes
+    # Predict outcomes - FIXED: Use correct classifier interface
     predictions = model.classifier(donor_embeds, recipient_embeds)
     
     # Compute loss
